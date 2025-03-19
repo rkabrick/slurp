@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Use fzf with explicit binding for spacebar multi-select.
-selected_files=$(find . -type f | fzf --multi --bind "space:toggle+down" --prompt="Select files: ")
+selected_files=$(find . -type f | fzf --multi --bind "space:toggle" --prompt="Select files: ")
 
 # Check if any file was selected.
 if [ -z "$selected_files" ]; then
