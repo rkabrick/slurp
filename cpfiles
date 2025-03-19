@@ -1,0 +1,46 @@
+#!/bin/bash
+set -euo pipefail
+
+# Use fzf with explicit binding for spacebar multi-select.
+selected_files=$(find . -type f | fzf --multi --bind "space:toggle+down" --prompt="Select files: ")
+
+# Check if any file was selected.
+if [ -z "$selected_files" ]; then
+  echo "No files selected. Exiting."
+  exit 1
+fi
+
+# Create a temporary file to hold the output.
+temp_file=$(mktemp)
+
+# Loop over each selected file.
+while IFS= read -r file; do
+  # Ensure the file exists and is readable.
+  if [ -r "$file" ]; then
+    # Remove the leading './' if it exists to show path relative to project root.
+    relative_path="${file#./}"
+    echo "==> $relative_path <==" >>"$temp_file"
+    cat "$file" >>"$temp_file"
+    echo -e "\n" >>"$temp_file"
+  else
+    echo "Warning: Cannot read file '$file'" >&2
+  fi
+done <<<"$selected_files"
+
+# Copy the concatenated content to the clipboard.
+if command -v pbcopy &>/dev/null; then
+  cat "$temp_file" | pbcopy
+elif command -v xclip &>/dev/null; then
+  cat "$temp_file" | xclip -selection clipboard
+elif command -v wl-copy &>/dev/null; then
+  cat "$temp_file" | wl-copy
+else
+  echo "No clipboard utility found. Please install pbcopy (macOS), xclip, or wl-copy (Linux)."
+  rm "$temp_file"
+  exit 1
+fi
+
+# Clean up temporary file.
+rm "$temp_file"
+
+echo "Copied contents of selected files to clipboard."
