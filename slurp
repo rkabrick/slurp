@@ -1,46 +1,129 @@
 #!/bin/bash
 set -euo pipefail
 
-# Use fzf with explicit binding for spacebar multi-select.
-selected_files=$(find . -type f | fzf --multi --bind "space:toggle" --prompt="Select files: ")
+recursive=false
+use_fzf=true # Default to fzf if no paths are given
 
-# Check if any file was selected.
-if [ -z "$selected_files" ]; then
-  echo "No files selected. Exiting."
+# --- Option Parsing ---
+# Process -r or -R for recursive operation
+while getopts ":rR" opt; do
+  case ${opt} in
+  r | R)
+    recursive=true
+    ;;
+  \?)
+    echo "Invalid option: -$OPTARG" >&2
+    exit 1
+    ;;
+  esac
+done
+shift $((OPTIND - 1)) # Remove parsed options from arguments
+
+# This array will hold the list of files to process
+selected_files_array=()
+
+# --- File Selection Logic ---
+if [ "$#" -gt 0 ]; then # If there are positional arguments (files/dirs or shell-expanded globs)
+  use_fzf=false
+  for path_arg in "$@"; do
+    if [ -f "$path_arg" ]; then
+      # It's a regular file (or a symlink to one)
+      selected_files_array+=("$path_arg")
+    elif [ -d "$path_arg" ]; then
+      # It's a directory (or a symlink to one)
+      if [ "$recursive" = true ]; then
+        # Find files recursively in the directory.
+        # Using -print0 and read -d $'\0' handles filenames with special characters.
+        while IFS= read -r -d $'\0' file; do
+          selected_files_array+=("$file")
+        done < <(find "$path_arg" -type f -print0)
+      else
+        echo "Warning: '$path_arg' is a directory. Use -r to process directories. Skipping." >&2
+      fi
+    elif [ ! -e "$path_arg" ]; then
+      # Argument does not exist (e.g., typo, or a glob pattern that didn't match anything)
+      echo "Warning: '$path_arg': No such file or directory, or pattern did not match. Skipping." >&2
+    else
+      # Exists but is not a regular file or directory (e.g., socket, fifo, block device)
+      echo "Warning: '$path_arg' is not a regular file or directory. Skipping." >&2
+    fi
+  done
+else # No positional arguments, use fzf for interactive selection
+  use_fzf=true
+  # The -r flag doesn't alter fzf behavior here as 'find . -type f' is already recursive for files.
+  # fzf for interactive file selection
+  fzf_output=$(find . -type f | fzf --multi --bind "space:toggle" --prompt="Select files with spacebar (Enter to confirm): ")
+
+  if [ -z "$fzf_output" ]; then
+    echo "No files selected via fzf. Exiting."
+    exit 1
+  fi
+  # Convert newline-separated string from fzf output to an array
+  while IFS= read -r line; do
+    selected_files_array+=("$line")
+  done <<<"$fzf_output"
+fi
+
+# --- Sanity Check for Selected Files ---
+if [ ${#selected_files_array[@]} -eq 0 ]; then
+  if [ "$use_fzf" = false ]; then
+    echo "No files found matching the arguments or criteria. Exiting."
+  else
+    # This case should ideally be caught by the fzf_output check, but serves as a fallback.
+    echo "No files were ultimately selected. Exiting."
+  fi
   exit 1
 fi
 
-# Create a temporary file to hold the output.
+# --- Content Aggregation and Clipboard ---
 temp_file=$(mktemp)
 
 # Loop over each selected file.
-while IFS= read -r file; do
-  # Ensure the file exists and is readable.
+for file in "${selected_files_array[@]}"; do
   if [ -r "$file" ]; then
-    # Remove the leading './' if it exists to show path relative to project root.
-    relative_path="${file#./}"
+    relative_path="${file#./}" # Remove leading './' for cleaner output
     echo "==> $relative_path <==" >>"$temp_file"
     cat "$file" >>"$temp_file"
-    echo -e "\n" >>"$temp_file"
+    echo -e "\n" >>"$temp_file" # Add a newline between file contents
   else
-    echo "Warning: Cannot read file '$file'" >&2
+    echo "Warning: Cannot read file '$file'. Skipping." >&2
   fi
-done <<<"$selected_files"
+done
+
+# Check if temp_file is empty (e.g., all selected files were unreadable or no files produced output)
+if [ ! -s "$temp_file" ]; then
+  if [ ${#selected_files_array[@]} -gt 0 ]; then
+    echo "No readable file content was aggregated from the selected files."
+  fi
+  rm "$temp_file"
+  # If files were selected but none were readable/had content, it's not an error if fzf was used.
+  # If arguments were given and nothing was processed, it might be considered an error by some.
+  # For simplicity, exit 0 if no content, as warnings would have been printed.
+  exit 0
+fi
 
 # Copy the concatenated content to the clipboard.
-if command -v pbcopy &>/dev/null; then
+clipboard_utility_found=false
+if command -v pbcopy &>/dev/null; then # macOS
   cat "$temp_file" | pbcopy
-elif command -v xclip &>/dev/null; then
+  clipboard_utility_found=true
+elif command -v xclip &>/dev/null; then # Linux X11
   cat "$temp_file" | xclip -selection clipboard
-elif command -v wl-copy &>/dev/null; then
+  clipboard_utility_found=true
+elif command -v wl-copy &>/dev/null; then # Linux Wayland
   cat "$temp_file" | wl-copy
-else
-  echo "No clipboard utility found. Please install pbcopy (macOS), xclip, or wl-copy (Linux)."
+  clipboard_utility_found=true
+fi
+
+# Clean up temporary file and provide feedback.
+if [ "$clipboard_utility_found" = true ]; then
   rm "$temp_file"
+  echo "Slurped contents of processed files to clipboard."
+else
+  echo "No clipboard utility (pbcopy, xclip, wl-copy) found."
+  echo "Content saved to: $temp_file"
+  # Do not delete temp_file if no clipboard utility is found, so user can access content.
   exit 1
 fi
 
-# Clean up temporary file.
-rm "$temp_file"
-
-echo "Copied contents of selected files to clipboard."
+exit 0
